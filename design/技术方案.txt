@@ -1,0 +1,95 @@
+一、 技术选型
+1. 核心框架与语言
+跨平台框架: Flutter (Dart语言)
+状态管理: Riverpod (推荐) 或 Bloc，适合管理复杂表单和跨页面状态。
+路由管理: GoRouter，支持声明式路由和深链接（虽然纯本地，但良好的路由管理利于页面跳转）。
+2. 数据与存储
+本地数据库: SQLite (使用 sqflite 插件)。用于存储菜谱、日记、标签等结构化数据。
+媒体文件存储: 使用 path_provider 获取 App 私有沙盒目录（如 Documents/media/）。图片/视频以 UUID 命名独立存储，数据库仅存储文件相对路径。
+本地缓存/轻量配置: SharedPreferences (用于存储应用锁开关、自动备份开关等小型 KV 数据)。
+3. 关键功能库依赖
+图表渲染: fl_chart (用于绘制雷达图、对比柱状图、时间轴)。
+压缩与解压: archive (用于将数据库和 media 文件夹打包成 ZIP，以及解压导入)。
+生物识别锁: local_auth (调用系统指纹/面容 ID)。
+外部跳转: url_launcher (跳转外部浏览器或视频 App)。
+图片处理: image_picker (拍照/选图), image (用于生成分享海报时的图片合成与模糊处理)。
+离线识别 (智能提取): google_mlkit_text_recognition (后续应该会使用大模型来实现,这个先保留接口)
+二、 系统架构设计
+采用分层架构，确保 UI 与业务逻辑、数据操作分离。
+
+Presentation (UI层)：Pages 和 Widgets，纯渲染和交互，通过 Riverpod Provider 获取数据。
+Domain/Logic (业务逻辑层)：处理核心业务规则（如：计算拿手菜排序、判定徽章是否解锁、表单校验）。
+Data (数据层)：
+Repositories: 统一数据出口，封装对 DB 和 File 的组合操作。
+Database Helper: 封装 SQLite 的 CRUD。
+File Storage Helper: 封装媒体文件的读写、删除。
+三、 本地数据库设计
+由于所有数据在本地，需设计合理的表结构以支持多维查询。
+
+核心表结构说明
+recipes (菜谱主表)
+id (PK), name, cover_path, type, current_version, created_at, updated_at
+recipe_versions (菜谱版本表)
+id (PK), recipe_id (FK), version_num (如 1, 2, 3)
+ingredients (JSON格式存储：[{name: "猪肉", amount: "500g"}])
+steps (JSON格式存储：[{desc: "切块", img: "path"}])
+video_url
+cook_logs (下厨日记表)
+id (PK), recipe_id (FK), version_id (FK), log_date
+is_success (Boolean)
+scores (JSON: {color: 4, aroma: 5, taste: 4})
+reason (成功秘诀/失败原因), notes (自由笔记)
+media_paths (JSON数组：本次拍摄的图片/视频路径)
+inspirations (灵感收集箱表)
+id (PK), content, link, created_at, is_converted (Boolean)
+tags (标签表) & recipe_tags (菜谱标签关联表)
+tags: id, name, type (系统预设/自定义)
+recipe_tags: recipe_id, tag_id
+badges (成就徽章记录表)
+code (徽章唯一标识), unlocked_at (解锁时间)
+goals (目标挑战表)
+id, title, target_count, current_count, is_done, created_at
+四、 核心功能技术实现
+1. 智能提取功能（本地化实现）
+由于要求“纯本地执行，不上传数据”，实现方案如下：
+
+链接文本提取：用户粘贴链接后，若为纯文本链接，App 尝试获取网页源码文本（受限于跨域和网络，成功率较低），因此主要依赖用户复制的图文文本。
+OCR 识别：用户可截图或选择相册图片，调用 google_mlkit_text_recognition 进行离线 OCR。
+正则解析引擎：将获取的文本，通过正则表达式匹配关键词：
+食材匹配：匹配包含“克(g)”、“毫升”、“勺”、“适量”等量词的行，提取为食材。
+步骤匹配：匹配以数字开头（如“1.”、“步骤一”）的行，提取为步骤。
+2. “成长看得见”数据计算
+拿手菜墙排序算法：执行 SQL 查询，按 recipe_id 分组，统计 cook_logs 表中 is_success = 1 的次数，并计算 scores 中各维度的平均值。排序权重公式：成功次数 * 0.6 + 平均综合评分 * 0.4。
+雷达图数据聚合：用户选择时间段后，查询该时间段的 cook_logs，提取 scores JSON，在 Dart 层计算各维度的平均值，传入 fl_chart 渲染。
+3. 分享卡片生成
+使用 Flutter 的 RepaintBoundary 组件包裹海报 UI。
+调用 toImage 将 UI 组件转化为图片字节流。
+底层成品图使用 BackdropFilter 做高斯模糊作为背景，前景清晰图叠加，最后调用系统分享。
+五、 数据迁移与备份方案（核心难点）
+此方案要求 100% 数据恢复，关键在于打包的结构完整性和导入时的防覆盖冲突。
+
+1. 导出流程
+暂停写入：锁定数据库（防止导出过程中用户新增数据导致不一致）。
+导出 DB：将 SQLite 数据库文件复制到临时目录，或将其内容全量序列化为一个 data.json 文件（推荐 JSON，跨平台兼容性更好，不受 SQLite 版本影响）。
+打包：使用 archive 插件，将 data.json 和 media/ 文件夹打包为 私厨备份_YYYYMMDD.zip。
+输出：通过 share_plus 插件调起系统分享面板，用户可保存到“文件” App 或发给微信好友。
+2. 导入流程（防呆与覆盖）
+文件校验：读取用户选择的 ZIP，检查内部是否包含合法的 data.json 和 media 目录。若校验失败，阻断。
+二次强确认：UI 弹窗提示“将清空当前数据”，要求用户长按按钮 3 秒确认。
+执行覆盖：
+关闭当前数据库连接。
+解压 ZIP 到临时目录。
+删除旧数据：清空 App 沙盒下的 media 目录。
+写入新数据：将解压出的 media 文件移动到沙盒目录；解析 data.json，逐表清空当前 SQLite 并执行批量 Insert。
+重启应用：数据写入完成后，调用 Restart.restartApp() 重启应用，重新初始化状态，防止内存中的旧状态污染新数据。
+3. 本地自动备份
+在 App 生命周期监听（WidgetsBindingObserver 的 didChangeAppLifecycleState）中，检测到 AppLifecycleState.paused（App 退到后台）时。
+判断设置项是否开启，若开启则在后台 Isolate 中静默执行一次类似“导出”的流程，将 ZIP 保存到 App 私有目录的特定备份文件夹下，仅保留最近 3 份备份。
+六、 性能优化建议
+媒体文件懒加载与缓存：
+虽然图片在本地，但大量原图直接读取会导致内存溢出（OOM）。
+使用 cached_network_image 或自定义 ImageProvider，在读取本地大图时，先生成缩略图缓存到内存，列表只展示缩略图，点击大图才加载原图。
+数据库索引优化：
+为 cook_logs 表的 recipe_id 和 log_date 建立索引，加快拿手菜排序和雷达图时间范围查询的速度。
+计算逻辑异步化：
+徽章判定、拿手菜排序等涉及大量数据遍历的逻辑，放入 compute() 函数在独立 Isolate 中执行，避免阻塞 UI 线程导致卡顿。
